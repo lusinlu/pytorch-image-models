@@ -236,3 +236,119 @@ class _RepeatSampler(object):
     def __iter__(self):
         while True:
             yield from iter(self.sampler)
+
+
+
+# dataloader respecting the PyTorch conventions, but using tensorpack to load and process
+# includes typical augmentations for ImageNet training
+
+import os
+import cv2
+import torch
+import tensorpack.dataflow as td
+from tensorpack import imgaug
+
+#####################################################################################################
+# copied from: https://github.com/ppwwyyxx/tensorpack/blob/master/examples/ResNet/imagenet_utils.py #
+#####################################################################################################
+
+
+
+def imagenet_augment(isTrain):
+    """
+    Augmentor used in fb.resnet.torch, for BGR images in range [0,255].
+    """
+    if isTrain:
+        augmentors = [
+            imgaug.GoogleNetRandomCropAndResize(),
+            imgaug.Flip(horiz=True),
+            imgaug.CenterCrop((224, 224)),]
+    else:
+        augmentors = [
+            imgaug.Resize(256),
+            imgaug.CenterCrop((224, 224)),]
+    return augmentors
+
+
+class Loader(object):
+    """
+    Data loader. Combines a dataset and a sampler, and provides
+    single- or multi-process iterators over the dataset.
+
+    Arguments:
+        mode (str, required): mode of dataset to operate in, one of ['train', 'val']
+        batch_size (int, optional): how many samples per batch to load
+            (default: 1).
+        shuffle (bool, optional): set to ``True`` to have the data reshuffled
+            at every epoch (default: False).
+        num_workers (int, optional): how many subprocesses to use for data
+            loading. 0 means that the data will be loaded in the main process
+            (default: 0)
+        cache (int, optional): cache size to use when loading data,
+        drop_last (bool, optional): set to ``True`` to drop the last incomplete batch,
+            if the dataset size is not divisible by the batch size. If ``False`` and
+            the size of dataset is not divisible by the batch size, then the last batch
+            will be smaller. (default: False)
+        cuda (bool, optional): set to ``True`` and the PyTorch tensors will get preloaded
+            to the GPU for you (necessary because this lets us to uint8 conversion on the
+            GPU, which is faster).
+    """
+
+    def __init__(self, mode,data_path, batch_size=256, shuffle=True, num_workers=25, cache=50000, cuda=False, drop_last=False):
+
+        # load the lmdb if we can find it
+        lmdb_loc = os.path.join(data_path,'ILSVRC-%s.lmdb'%mode)
+        # enumerate standard imagenet augmentors
+        imagenet_augmentors = imagenet_augment(mode == 'train')
+
+        ds = td.LMDBSerializer.load(lmdb_loc, shuffle=False)
+
+        ds = td.LocallyShuffleData(ds, cache)
+        ds = td.PrefetchData(ds, 10000, 1)
+        if shuffle:
+            ds = td.LocallyShuffleData(ds=ds, buffer_size=10000)
+        ds = td.MapDataComponent(ds, lambda x: cv2.cvtColor(cv2.imdecode(x, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB), 0)
+        ds = td.AugmentImageComponent(ds, imagenet_augmentors)
+        ds = td.PrefetchDataZMQ(ds, num_workers)
+        self.ds = td.BatchData(ds, batch_size)
+        self.ds.reset_state()
+
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.cuda = cuda
+
+    def __iter__(self):
+        for x, y in self.ds.get_data():
+            if self.cuda:
+                # images come out as uint8, which are faster to copy onto the gpu
+                x = torch.ByteTensor(x).cuda()
+                y = torch.IntTensor(y).cuda()
+                # but once they're on the gpu, we'll need them in
+                # yield normalise(uint8_to_float(x)), y.long()
+                yield uint8_to_float(x), y.long()
+
+
+            else:
+                yield normalise(uint8_to_float(torch.ByteTensor(x))), torch.IntTensor(y).long()
+                # yield uint8_to_float(torch.ByteTensor(x)), torch.IntTensor(y).long()
+
+    def __len__(self):
+        return self.ds.size()
+
+def normalise(tensor):
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+
+    dtype = tensor.dtype
+    mean = torch.as_tensor(mean, dtype=dtype, device=tensor.device)
+    std = torch.as_tensor(std, dtype=dtype, device=tensor.device)
+    tensor.sub_(mean[None, :, None, None]).div_(std[None, :, None, None])
+    return tensor
+
+
+def uint8_to_float(x):
+    x = x.permute(0,3,1,2) # pytorch is (n,c,w,h)
+    return x.float()/255.
+
+
+

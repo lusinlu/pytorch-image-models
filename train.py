@@ -29,6 +29,7 @@ except ImportError:
     has_apex = False
 
 from timm.data import Dataset, create_loader, resolve_data_config, FastCollateMixup, mixup_batch, AugMixDataset
+from timm.data.loader import Loader
 from timm.models import create_model, resume_checkpoint, convert_splitbn_model
 from timm.utils import *
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy
@@ -377,51 +378,54 @@ def main():
     if num_aug_splits > 1:
         dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
 
-    loader_train = create_loader(
-        dataset_train,
-        input_size=data_config['input_size'],
-        batch_size=args.batch_size,
-        is_training=True,
-        use_prefetcher=args.prefetcher,
-        re_prob=args.reprob,
-        re_mode=args.remode,
-        re_count=args.recount,
-        re_split=args.resplit,
-        color_jitter=args.color_jitter,
-        auto_augment=args.aa,
-        num_aug_splits=num_aug_splits,
-        interpolation=args.train_interpolation,
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        distributed=args.distributed,
-        collate_fn=collate_fn,
-        pin_memory=args.pin_mem,
-        use_multi_epochs_loader=args.use_multi_epochs_loader
-    )
+    # loader_train = create_loader(
+    #     dataset_train,
+    #     input_size=data_config['input_size'],
+    #     batch_size=args.batch_size,
+    #     is_training=True,
+    #     use_prefetcher=args.prefetcher,
+    #     re_prob=args.reprob,
+    #     re_mode=args.remode,
+    #     re_count=args.recount,
+    #     re_split=args.resplit,
+    #     color_jitter=args.color_jitter,
+    #     auto_augment=args.aa,
+    #     num_aug_splits=num_aug_splits,
+    #     interpolation=args.train_interpolation,
+    #     mean=data_config['mean'],
+    #     std=data_config['std'],
+    #     num_workers=args.workers,
+    #     distributed=args.distributed,
+    #     collate_fn=collate_fn,
+    #     pin_memory=args.pin_mem,
+    #     use_multi_epochs_loader=args.use_multi_epochs_loader
+    # )
+    #
+    # eval_dir = os.path.join(args.data, 'val')
+    # if not os.path.isdir(eval_dir):
+    #     eval_dir = os.path.join(args.data, 'validation')
+    #     if not os.path.isdir(eval_dir):
+    #         logging.error('Validation folder does not exist at: {}'.format(eval_dir))
+    #         exit(1)
+    # dataset_eval = Dataset(eval_dir)
+    #
+    # loader_eval = create_loader(
+    #     dataset_eval,
+    #     input_size=data_config['input_size'],
+    #     batch_size=args.validation_batch_size_multiplier * args.batch_size,
+    #     is_training=False,
+    #     use_prefetcher=args.prefetcher,
+    #     interpolation=data_config['interpolation'],
+    #     mean=data_config['mean'],
+    #     std=data_config['std'],
+    #     num_workers=args.workers,
+    #     distributed=args.distributed,
+    #     crop_pct=data_config['crop_pct'],
+    #     pin_memory=args.pin_mem,
+    # )
 
-    eval_dir = os.path.join(args.data, 'val')
-    if not os.path.isdir(eval_dir):
-        eval_dir = os.path.join(args.data, 'validation')
-        if not os.path.isdir(eval_dir):
-            logging.error('Validation folder does not exist at: {}'.format(eval_dir))
-            exit(1)
-    dataset_eval = Dataset(eval_dir)
-
-    loader_eval = create_loader(
-        dataset_eval,
-        input_size=data_config['input_size'],
-        batch_size=args.validation_batch_size_multiplier * args.batch_size,
-        is_training=False,
-        use_prefetcher=args.prefetcher,
-        interpolation=data_config['interpolation'],
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        distributed=args.distributed,
-        crop_pct=data_config['crop_pct'],
-        pin_memory=args.pin_mem,
-    )
+    loader_train = Loader('train', train_dir, batch_size=args.batch_size, num_workers=args.workers)
+    loader_eval = Loader('val', train_dir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
 
     if args.jsd:
         assert num_aug_splits > 1  # JSD only valid with aug splits set
