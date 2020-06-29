@@ -14,22 +14,19 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
+import tensorpack.dataflow as df
 import argparse
 import time
 import yaml
 from datetime import datetime
 
-try:
-    from apex import amp
-    from apex.parallel import DistributedDataParallel as DDP
-    from apex.parallel import convert_syncbn_model
-    has_apex = True
-except ImportError:
-    from torch.nn.parallel import DistributedDataParallel as DDP
-    has_apex = False
 
-from timm.data import Dataset, create_loader, resolve_data_config, FastCollateMixup, mixup_batch, AugMixDataset
+has_apex = False
+
+    # , FastCollateMixup, mixup_batch, AugMixDataset
 from timm.data.loader import Loader
+from timm.data import Dataset, resolve_data_config
+
 from timm.models import create_model, resume_checkpoint, convert_splitbn_model
 from timm.utils import *
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy, JsdCrossEntropy
@@ -40,8 +37,9 @@ import torch
 import torch.nn as nn
 import torchvision.utils
 
-torch.backends.cudnn.benchmark = True
-
+torch.manual_seed(0)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 # The first arg parser parses out only the --config argument, this argument is used to
 # load a yaml file containing key-values that override the defaults for the main parser below
@@ -228,33 +226,33 @@ def main():
     setup_default_logging()
     args, args_text = _parse_args()
 
-    args.prefetcher = not args.no_prefetcher
-    args.distributed = False
-    if 'WORLD_SIZE' in os.environ:
-        args.distributed = int(os.environ['WORLD_SIZE']) > 1
-        if args.distributed and args.num_gpu > 1:
-            logging.warning('Using more than one GPU per process in distributed mode is not allowed. Setting num_gpu to 1.')
-            args.num_gpu = 1
+    # args.prefetcher = not args.no_prefetcher
+    # args.distributed = False
+    # if 'WORLD_SIZE' in os.environ:
+    #     args.distributed = int(os.environ['WORLD_SIZE']) > 1
+    #     if args.distributed and args.num_gpu > 1:
+    #         logging.warning('Using more than one GPU per process in distributed mode is not allowed. Setting num_gpu to 1.')
+    #         args.num_gpu = 1
+    #
+    # args.device = 'cuda:0'
+    # args.world_size = 1
+    # args.rank = 0  # global rank
+    # if args.distributed:
+    #     args.num_gpu = 1
+    #     args.device = 'cuda:%d' % args.local_rank
+    #     torch.cuda.set_device(args.local_rank)
+    #     torch.distributed.init_process_group(backend='nccl', init_method='env://')
+    #     args.world_size = torch.distributed.get_world_size()
+    #     args.rank = torch.distributed.get_rank()
+    # assert args.rank >= 0
+    #
+    # if args.distributed:
+    #     logging.info('Training in distributed mode with multiple processes, 1 GPU per process. Process %d, total %d.'
+    #                  % (args.rank, args.world_size))
+    # else:
+    #     logging.info('Training with a single process on %d GPUs.' % args.num_gpu)
 
-    args.device = 'cuda:0'
-    args.world_size = 1
-    args.rank = 0  # global rank
-    if args.distributed:
-        args.num_gpu = 1
-        args.device = 'cuda:%d' % args.local_rank
-        torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group(backend='nccl', init_method='env://')
-        args.world_size = torch.distributed.get_world_size()
-        args.rank = torch.distributed.get_rank()
-    assert args.rank >= 0
-
-    if args.distributed:
-        logging.info('Training in distributed mode with multiple processes, 1 GPU per process. Process %d, total %d.'
-                     % (args.rank, args.world_size))
-    else:
-        logging.info('Training with a single process on %d GPUs.' % args.num_gpu)
-
-    torch.manual_seed(args.seed + args.rank)
+    # torch.manual_seed(args.seed + args.rank)
 
     model = create_model(
         args.model,
@@ -270,9 +268,9 @@ def main():
         bn_eps=args.bn_eps,
         checkpoint_path=args.initial_checkpoint)
 
-    if args.local_rank == 0:
-        logging.info('Model %s created, param count: %d' %
-                     (args.model, sum([m.numel() for m in model.parameters()])))
+    # if args.local_rank == 0:
+    #     logging.info('Model %s created, param count: %d' %
+    #                  (args.model, sum([m.numel() for m in model.parameters()])))
 
     data_config = resolve_data_config(vars(args), model=model, verbose=args.local_rank == 0)
 
@@ -285,26 +283,17 @@ def main():
         assert num_aug_splits > 1 or args.resplit
         model = convert_splitbn_model(model, max(num_aug_splits, 2))
 
-    if args.num_gpu > 1:
-        if args.amp:
-            logging.warning(
-                'AMP does not work well with nn.DataParallel, disabling. Use distributed mode for multi-GPU AMP.')
-            args.amp = False
-        model = nn.DataParallel(model, device_ids=list(range(args.num_gpu))).cuda()
-    else:
-        model.cuda()
+    # if args.num_gpu > 1:
+    #     if args.amp:
+    #         logging.warning(
+    #             'AMP does not work well with nn.DataParallel, disabling. Use distributed mode for multi-GPU AMP.')
+    #         args.amp = False
+    # optionally resume from a checkpoint
 
     optimizer = create_optimizer(args, model)
 
     use_amp = False
-    if has_apex and args.amp:
-        model, optimizer = amp.initialize(model, optimizer, opt_level='O1')
-        use_amp = True
-    if args.local_rank == 0:
-        logging.info('NVIDIA APEX {}. AMP {}.'.format(
-            'installed' if has_apex else 'not installed', 'on' if use_amp else 'off'))
 
-    # optionally resume from a checkpoint
     resume_state = {}
     resume_epoch = None
     if args.resume:
@@ -320,6 +309,21 @@ def main():
             amp.load_state_dict(resume_state['amp'])
     del resume_state
 
+    model = nn.DataParallel(model).cuda()
+    print('model to data parallel')
+    # else:
+    #     model.cuda()
+
+
+    # if has_apex and args.amp:
+    #     model, optimizer = amp.initialize(model, optimizer, opt_level='O1')
+    #     use_amp = True
+    if args.local_rank == 0:
+        logging.info('NVIDIA APEX {}. AMP {}.'.format(
+            'installed' if has_apex else 'not installed', 'on' if use_amp else 'off'))
+
+
+
     model_ema = None
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -329,27 +333,23 @@ def main():
             device='cpu' if args.model_ema_force_cpu else '',
             resume=args.resume)
 
-    if args.distributed:
-        if args.sync_bn:
-            assert not args.split_bn
-            try:
-                if has_apex:
-                    model = convert_syncbn_model(model)
-                else:
-                    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-                if args.local_rank == 0:
-                    logging.info(
-                        'Converted model to use Synchronized BatchNorm. WARNING: You may have issues if using '
-                        'zero initialized BN layers (enabled by default for ResNets) while sync-bn enabled.')
-            except Exception as e:
-                logging.error('Failed to enable Synchronized BatchNorm. Install Apex or Torch >= 1.1')
-        if has_apex:
-            model = DDP(model, delay_allreduce=True)
-        else:
-            if args.local_rank == 0:
-                logging.info("Using torch DistributedDataParallel. Install NVIDIA Apex for Apex DDP.")
-            model = DDP(model, device_ids=[args.local_rank])  # can use device str in Torch >= 1.1
-        # NOTE: EMA model does not need to be wrapped by DDP
+    # if args.distributed:
+    #     if args.sync_bn:
+    #         assert not args.split_bn
+    #         try:
+    #
+    #             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    #             if args.local_rank == 0:
+    #                 logging.info(
+    #                     'Converted model to use Synchronized BatchNorm. WARNING: You may have issues if using '
+    #                     'zero initialized BN layers (enabled by default for ResNets) while sync-bn enabled.')
+    #         except Exception as e:
+    #             logging.error('Failed to enable Synchronized BatchNorm. Install Apex or Torch >= 1.1')
+    #
+    #     if args.local_rank == 0:
+    #         logging.info("Using torch DistributedDataParallel. Install NVIDIA Apex for Apex DDP.")
+    #     model = DDP(model, device_ids=[args.local_rank])  # can use device str in Torch >= 1.1
+    #     # NOTE: EMA model does not need to be wrapped by DDP
 
     lr_scheduler, num_epochs = create_scheduler(args, optimizer)
     start_epoch = 0
@@ -364,19 +364,19 @@ def main():
     if args.local_rank == 0:
         logging.info('Scheduled epochs: {}'.format(num_epochs))
 
-    train_dir = os.path.join(args.data, 'train')
+    train_dir = args.data
     if not os.path.exists(train_dir):
         logging.error('Training folder does not exist at: {}'.format(train_dir))
         exit(1)
     dataset_train = Dataset(train_dir)
 
-    collate_fn = None
-    if args.prefetcher and args.mixup > 0:
-        assert not num_aug_splits  # collate conflict (need to support deinterleaving in collate mixup)
-        collate_fn = FastCollateMixup(args.mixup, args.smoothing, args.num_classes)
-
-    if num_aug_splits > 1:
-        dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
+    # collate_fn = None
+    # if args.prefetcher and args.mixup > 0:
+    #     assert not num_aug_splits  # collate conflict (need to support deinterleaving in collate mixup)
+    #     collate_fn = FastCollateMixup(args.mixup, args.smoothing, args.num_classes)
+    #
+    # if num_aug_splits > 1:
+    #     dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
 
     # loader_train = create_loader(
     #     dataset_train,
@@ -427,63 +427,63 @@ def main():
     loader_train = Loader('train', train_dir, batch_size=args.batch_size, num_workers=args.workers)
     loader_eval = Loader('val', train_dir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
 
-    if args.jsd:
-        assert num_aug_splits > 1  # JSD only valid with aug splits set
-        train_loss_fn = JsdCrossEntropy(num_splits=num_aug_splits, smoothing=args.smoothing).cuda()
-        validate_loss_fn = nn.CrossEntropyLoss().cuda()
-    elif args.mixup > 0.:
-        # smoothing is handled with mixup label transform
-        train_loss_fn = SoftTargetCrossEntropy().cuda()
-        validate_loss_fn = nn.CrossEntropyLoss().cuda()
-    elif args.smoothing:
-        train_loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing).cuda()
-        validate_loss_fn = nn.CrossEntropyLoss().cuda()
-    else:
-        train_loss_fn = nn.CrossEntropyLoss().cuda()
-        validate_loss_fn = train_loss_fn
+    # if args.jsd:
+    #     assert num_aug_splits > 1  # JSD only valid with aug splits set
+    #     train_loss_fn = JsdCrossEntropy(num_splits=num_aug_splits, smoothing=args.smoothing).cuda()
+    #     validate_loss_fn = nn.CrossEntropyLoss().cuda()
+    # elif args.mixup > 0.:
+    #     # smoothing is handled with mixup label transform
+    #     train_loss_fn = SoftTargetCrossEntropy().cuda()
+    #     validate_loss_fn = nn.CrossEntropyLoss().cuda()
+    # elif args.smoothing:
+    #     train_loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing).cuda()
+    #     validate_loss_fn = nn.CrossEntropyLoss().cuda()
+    # else:
+    train_loss_fn = nn.CrossEntropyLoss().cuda()
+    validate_loss_fn = train_loss_fn
 
     eval_metric = args.eval_metric
     best_metric = None
     best_epoch = None
     saver = None
     output_dir = ''
-    if args.local_rank == 0:
-        output_base = args.output if args.output else './output'
-        exp_name = '-'.join([
-            datetime.now().strftime("%Y%m%d-%H%M%S"),
-            args.model,
-            str(data_config['input_size'][-1])
-        ])
-        output_dir = get_outdir(output_base, 'train', exp_name)
-        decreasing = True if eval_metric == 'loss' else False
-        saver = CheckpointSaver(checkpoint_dir=output_dir, decreasing=decreasing)
-        with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
-            f.write(args_text)
+    # if args.local_rank == 0:
+    output_base = args.output if args.output else './output'
+    exp_name = '-'.join([
+        datetime.now().strftime("%Y%m%d-%H%M%S"),
+        args.model,
+        str(data_config['input_size'][-1])
+    ])
+    output_dir = get_outdir(output_base, 'train', exp_name)
+    decreasing = True if eval_metric == 'loss' else False
+    saver = CheckpointSaver(checkpoint_dir=output_dir, decreasing=decreasing)
+    with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
+        f.write(args_text)
 
     try:
         for epoch in range(start_epoch, num_epochs):
-            if args.distributed:
-                loader_train.sampler.set_epoch(epoch)
+            # if args.distributed:
+            #     loader_train.sampler.set_epoch(epoch)
 
             train_metrics = train_epoch(
                 epoch, model, loader_train, optimizer, train_loss_fn, args,
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
                 use_amp=use_amp, model_ema=model_ema)
 
-            if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                if args.local_rank == 0:
-                    logging.info("Distributing BatchNorm running means and vars")
-                distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
+            # if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+            #     if args.local_rank == 0:
+            #         logging.info("Distributing BatchNorm running means and vars")
+            #     distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
 
             eval_metrics = validate(model, loader_eval, validate_loss_fn, args)
 
             if model_ema is not None and not args.model_ema_force_cpu:
-                if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-                    distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
+                # if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+                #     distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
 
                 ema_eval_metrics = validate(
                     model_ema.ema, loader_eval, validate_loss_fn, args, log_suffix=' (EMA)')
-                eval_metrics = ema_eval_metrics
+                # eval_metrics = ema_eval_metrics
 
             if lr_scheduler is not None:
                 # step LR for next epoch
@@ -510,9 +510,9 @@ def train_epoch(
         epoch, model, loader, optimizer, loss_fn, args,
         lr_scheduler=None, saver=None, output_dir='', use_amp=False, model_ema=None):
 
-    if args.prefetcher and args.mixup > 0 and loader.mixup_enabled:
-        if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
-            loader.mixup_enabled = False
+    # if args.prefetcher and args.mixup > 0 and loader.mixup_enabled:
+    #     if args.mixup_off_epoch and epoch >= args.mixup_off_epoch:
+    #         loader.mixup_enabled = False
 
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
@@ -526,19 +526,19 @@ def train_epoch(
     for batch_idx, (input, target) in enumerate(loader):
         last_batch = batch_idx == last_idx
         data_time_m.update(time.time() - end)
-        if not args.prefetcher:
-            input, target = input.cuda(), target.cuda()
-            if args.mixup > 0.:
-                input, target = mixup_batch(
-                    input, target,
-                    alpha=args.mixup, num_classes=args.num_classes, smoothing=args.smoothing,
-                    disable=args.mixup_off_epoch and epoch >= args.mixup_off_epoch)
+        # if not args.prefetcher:
+        input, target = input.cuda(), target.cuda()
+            # if args.mixup > 0.:
+            #     input, target = mixup_batch(
+            #         input, target,
+            #         alpha=args.mixup, num_classes=args.num_classes, smoothing=args.smoothing,
+            #         disable=args.mixup_off_epoch and epoch >= args.mixup_off_epoch)
 
         output = model(input)
 
         loss = loss_fn(output, target)
-        if not args.distributed:
-            losses_m.update(loss.item(), input.size(0))
+        # if not args.distributed:
+        losses_m.update(loss.item(), input.size(0))
 
         optimizer.zero_grad()
         if use_amp:
@@ -558,34 +558,34 @@ def train_epoch(
             lrl = [param_group['lr'] for param_group in optimizer.param_groups]
             lr = sum(lrl) / len(lrl)
 
-            if args.distributed:
-                reduced_loss = reduce_tensor(loss.data, args.world_size)
-                losses_m.update(reduced_loss.item(), input.size(0))
+            # if args.distributed:
+            #     reduced_loss = reduce_tensor(loss.data, args.world_size)
+            #     losses_m.update(reduced_loss.item(), input.size(0))
 
-            if args.local_rank == 0:
-                logging.info(
-                    'Train: {} [{:>4d}/{} ({:>3.0f}%)]  '
-                    'Loss: {loss.val:>9.6f} ({loss.avg:>6.4f})  '
-                    'Time: {batch_time.val:.3f}s, {rate:>7.2f}/s  '
-                    '({batch_time.avg:.3f}s, {rate_avg:>7.2f}/s)  '
-                    'LR: {lr:.3e}  '
-                    'Data: {data_time.val:.3f} ({data_time.avg:.3f})'.format(
-                        epoch,
-                        batch_idx, len(loader),
-                        100. * batch_idx / last_idx,
-                        loss=losses_m,
-                        batch_time=batch_time_m,
-                        rate=input.size(0) * args.world_size / batch_time_m.val,
-                        rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
-                        lr=lr,
-                        data_time=data_time_m))
+            # if args.local_rank == 0:
+            logging.info(
+                'Train: {} [{:>4d}/{} ({:>3.0f}%)]  '
+                'Loss: {loss.val:>9.6f} ({loss.avg:>6.4f})  '
+                'Time: {batch_time.val:.3f}s, {rate:>7.2f}/s  '
+                '({batch_time.avg:.3f}s, {rate_avg:>7.2f}/s)  '
+                'LR: {lr:.3e}  '
+                'Data: {data_time.val:.3f} ({data_time.avg:.3f})'.format(
+                    epoch,
+                    batch_idx, len(loader),
+                    100. * batch_idx / last_idx,
+                    loss=losses_m,
+                    batch_time=batch_time_m,
+                    rate=input.size(0)  / batch_time_m.val,
+                    rate_avg=input.size(0) / batch_time_m.avg,
+                    lr=lr,
+                    data_time=data_time_m))
 
-                if args.save_images and output_dir:
-                    torchvision.utils.save_image(
-                        input,
-                        os.path.join(output_dir, 'train-batch-%d.jpg' % batch_idx),
-                        padding=0,
-                        normalize=True)
+            if args.save_images and output_dir:
+                torchvision.utils.save_image(
+                    input,
+                    os.path.join(output_dir, 'train-batch-%d.jpg' % batch_idx),
+                    padding=0,
+                    normalize=True)
 
         if saver is not None and args.recovery_interval and (
                 last_batch or (batch_idx + 1) % args.recovery_interval == 0):
@@ -617,9 +617,9 @@ def validate(model, loader, loss_fn, args, log_suffix=''):
     with torch.no_grad():
         for batch_idx, (input, target) in enumerate(loader):
             last_batch = batch_idx == last_idx
-            if not args.prefetcher:
-                input = input.cuda()
-                target = target.cuda()
+
+            input = input.cuda()
+            target = target.cuda()
 
             output = model(input)
             if isinstance(output, (tuple, list)):
@@ -634,12 +634,12 @@ def validate(model, loader, loss_fn, args, log_suffix=''):
             loss = loss_fn(output, target)
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
-            if args.distributed:
-                reduced_loss = reduce_tensor(loss.data, args.world_size)
-                acc1 = reduce_tensor(acc1, args.world_size)
-                acc5 = reduce_tensor(acc5, args.world_size)
-            else:
-                reduced_loss = loss.data
+            # if args.distributed:
+            #     reduced_loss = reduce_tensor(loss.data, args.world_size)
+            #     acc1 = reduce_tensor(acc1, args.world_size)
+            #     acc5 = reduce_tensor(acc5, args.world_size)
+            # else:
+            reduced_loss = loss.data
 
             torch.cuda.synchronize()
 
@@ -649,7 +649,7 @@ def validate(model, loader, loss_fn, args, log_suffix=''):
 
             batch_time_m.update(time.time() - end)
             end = time.time()
-            if args.local_rank == 0 and (last_batch or batch_idx % args.log_interval == 0):
+            if  (last_batch or batch_idx % args.log_interval == 0):
                 log_name = 'Test' + log_suffix
                 logging.info(
                     '{0}: [{1:>4d}/{2}]  '
