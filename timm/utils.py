@@ -60,11 +60,11 @@ class CheckpointSaver:
         self.max_history = max_history
         assert self.max_history >= 1
 
-    def save_checkpoint(self, model, optimizer, args, epoch, model_ema=None, metric=None, use_amp=False):
+    def save_checkpoint(self, model, optimizer, args, epoch, model_ema=None, metric=None,metric_ema=None, use_amp=False):
         assert epoch >= 0
         tmp_save_path = os.path.join(self.checkpoint_dir, 'tmp' + self.extension)
         last_save_path = os.path.join(self.checkpoint_dir, 'last' + self.extension)
-        self._save(tmp_save_path, model, optimizer, args, epoch, model_ema, metric, use_amp)
+        self._save(tmp_save_path, model, optimizer, args, epoch, model_ema, metric,metric_ema, use_amp)
         if os.path.exists(last_save_path):
             os.unlink(last_save_path) # required for Windows support.
         os.rename(tmp_save_path, last_save_path)
@@ -96,7 +96,7 @@ class CheckpointSaver:
 
         return (None, None) if self.best_metric is None else (self.best_metric, self.best_epoch)
 
-    def _save(self, save_path, model, optimizer, args, epoch, model_ema=None, metric=None, use_amp=False):
+    def _save(self, save_path, model, optimizer, args, epoch, model_ema=None, metric=None,metric_ema=None, use_amp=False):
         save_state = {
             'epoch': epoch,
             'arch': args.model,
@@ -111,6 +111,8 @@ class CheckpointSaver:
             save_state['state_dict_ema'] = get_state_dict(model_ema)
         if metric is not None:
             save_state['metric'] = metric
+        if metric is not None:
+            save_state['metric_ema'] = metric_ema
         torch.save(save_state, save_path)
 
     def _cleanup_checkpoints(self, trim=0):
@@ -195,10 +197,12 @@ def get_outdir(path, *paths, inc=False):
     return outdir
 
 
-def update_summary(epoch, train_metrics, eval_metrics, filename, write_header=False):
+def update_summary(epoch, train_metrics, eval_metrics, eval_metrics_ema, filename, write_header=False):
     rowd = OrderedDict(epoch=epoch)
     rowd.update([('train_' + k, v) for k, v in train_metrics.items()])
     rowd.update([('eval_' + k, v) for k, v in eval_metrics.items()])
+    rowd.update([('eval_ema' + k, v) for k, v in eval_metrics_ema.items()])
+
     with open(filename, mode='a') as cf:
         dw = csv.DictWriter(cf, fieldnames=rowd.keys())
         if write_header:  # first iteration (epoch == 1 can't be used)
@@ -312,3 +316,24 @@ def setup_default_logging(default_level=logging.INFO):
     console_handler.setFormatter(FormatterNoInfo())
     logging.root.addHandler(console_handler)
     logging.root.setLevel(default_level)
+
+def variance_per_pred(x, y_batch,y_pred):
+    var_correct = torch.FloatTensor([0])
+    var_incorrect = torch.FloatTensor([0])
+
+    binary_pred = y_pred.eq(y_batch)
+    x_correct = x[binary_pred == 1]
+    x_incorrect = x[binary_pred == 0]
+    if len(x_correct) != 0:
+        for i in range(len(x_correct)):
+            var_correct += torch.var(x_correct[i].flatten())
+        var_correct /= len(x_correct)
+
+
+    if len(x_incorrect) != 0:
+        for i in range(len(x_incorrect)):
+            var_incorrect += torch.var(x_incorrect[i].flatten())
+        var_incorrect /= len(x_incorrect)
+
+
+    return var_correct.detach().cpu().numpy(), var_incorrect.detach().cpu().numpy()
