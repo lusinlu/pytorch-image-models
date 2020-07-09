@@ -40,7 +40,7 @@ class CheckpointSaver:
             checkpoint_dir='',
             recovery_dir='',
             decreasing=False,
-            max_history=10):
+            max_history=1000):
 
         # state
         self.checkpoint_files = []  # (filename, metric) tuples in order of decreasing betterness

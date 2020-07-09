@@ -38,7 +38,7 @@ import torchvision.utils
 
 torch.manual_seed(0)
 torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.benchmark = True
 
 # The first arg parser parses out only the --config argument, this argument is used to
 # load a yaml file containing key-values that override the defaults for the main parser below
@@ -63,8 +63,8 @@ parser.add_argument('--no-resume-opt', action='store_true', default=False,
                     help='prevent resume of optimizer state when resuming model')
 parser.add_argument('--num-classes', type=int, default=1000, metavar='N',
                     help='number of label classes (default: 1000)')
-# parser.add_argument('--gp', default='avg', type=str, metavar='POOL',
-#                     help='Type of global pool, "avg", "max", "avgmax", "avgmaxc" (default: "avg")')
+parser.add_argument('--gp', default='avg', type=str, metavar='POOL',
+                    help='Type of global pool, "avg", "max", "avgmax", "avgmaxc" (default: "avg")')
 parser.add_argument('--img-size', type=int, default=None, metavar='N',
                     help='Image patch size (default: None => model default)') # TODO resize + crop
 # parser.add_argument('--crop-pct', default=None, type=float,
@@ -155,12 +155,12 @@ parser.add_argument('--decay-rate', '--dr', type=float, default=0.1, metavar='RA
 # parser.add_argument('--train-interpolation', type=str, default='random',
 #                     help='Training interpolation (random, bilinear, bicubic default: "random")')
 # Batch norm parameters (only works with gen_efficientnet based models currently)
-# parser.add_argument('--bn-tf', action='store_true', default=False,
-#                     help='Use Tensorflow BatchNorm defaults for models that support it (default: False)')
-# parser.add_argument('--bn-momentum', type=float, default=None,
-#                     help='BatchNorm momentum override (if not None)')
-# parser.add_argument('--bn-eps', type=float, default=None,
-#                     help='BatchNorm epsilon override (if not None)')
+parser.add_argument('--bn-tf', action='store_true', default=False,
+                    help='Use Tensorflow BatchNorm defaults for models that support it (default: False)')
+parser.add_argument('--bn-momentum', type=float, default=None,
+                    help='BatchNorm momentum override (if not None)')
+parser.add_argument('--bn-eps', type=float, default=None,
+                    help='BatchNorm epsilon override (if not None)')
 # parser.add_argument('--sync-bn', action='store_true',
 #                     help='Enable NVIDIA Apex or Torch synchronized BatchNorm.')
 # parser.add_argument('--dist-bn', type=str, default='',
@@ -221,6 +221,17 @@ def _parse_args():
     return args, args_text
 
 
+def update_lr(args, optimizer, epoch, per_epoch_update=True, it=None, warmup_its=None):
+    if epoch < args.warmup_epochs and not per_epoch_update:
+        step = (args.lr - args.warmup_lr) / warmup_its
+        lr = it * step + args.warmup_lr
+        for i, param_group in enumerate(optimizer.param_groups):
+            param_group['lr'] = lr
+    elif epoch > args.warmup_epochs and per_epoch_update:
+        lr = args.lr * (args.decay_rate ** (epoch // args.decay_epochs))
+        for i, param_group in enumerate(optimizer.param_groups):
+            param_group['lr'] = lr
+
 def main():
     setup_default_logging()
     args, args_text = _parse_args()
@@ -242,7 +253,7 @@ def main():
 
     # model = skip_v3(num_classes=args.num_classes)
 
-    data_config = resolve_data_config(vars(args), model=model, verbose=args.local_rank == 0)
+    data_config = resolve_data_config(vars(args), model=model, verbose=True)
 
 
 
@@ -254,15 +265,15 @@ def main():
     resume_epoch = None
     if args.resume:
         resume_state, resume_epoch = resume_checkpoint(model, args.resume)
-    if resume_state and not args.no_resume_opt:
-        if 'optimizer' in resume_state:
-            if args.local_rank == 0:
-                logging.info('Restoring Optimizer state from checkpoint')
-            optimizer.load_state_dict(resume_state['optimizer'])
-        if use_amp and 'amp' in resume_state and 'load_state_dict' in amp.__dict__:
-            if args.local_rank == 0:
-                logging.info('Restoring NVIDIA AMP state from checkpoint')
-            amp.load_state_dict(resume_state['amp'])
+    # if resume_state and not args.no_resume_opt:
+    #     if 'optimizer' in resume_state:
+    #         if args.local_rank == 0:
+    #             logging.info('Restoring Optimizer state from checkpoint')
+    #         optimizer.load_state_dict(resume_state['optimizer'])
+    #     if use_amp and 'amp' in resume_state and 'load_state_dict' in amp.__dict__:
+    #         if args.local_rank == 0:
+    #             logging.info('Restoring NVIDIA AMP state from checkpoint')
+    #         amp.load_state_dict(resume_state['amp'])
     del resume_state
 
     model = nn.DataParallel(model).cuda()
@@ -274,26 +285,39 @@ def main():
         model_ema = ModelEma(
             model,
             decay=args.model_ema_decay,
-            device='cpu' if args.model_ema_force_cpu else '',
+            device='',
             resume=args.resume)
 
-    lr_scheduler, num_epochs = create_scheduler(args, optimizer)
+    # lr_scheduler, num_epochs = create_scheduler(args, optimizer)
+    # print((optimizer.param_groups[1]['lr']))
+    # lambda_epoch = lambda epoch:( (args.decay_rate ** ((epoch - args.warmup_epochs) // args.decay_epochs)) if (epoch > args.warmup_epochs) else 1)
+
+    # lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_epoch)
+
     start_epoch = 0
     if args.start_epoch is not None:
         # a specified start_epoch will always override the resume epoch
         start_epoch = args.start_epoch
     elif resume_epoch is not None:
         start_epoch = resume_epoch
-    if lr_scheduler is not None and start_epoch > 0:
-        lr_scheduler.step(start_epoch)
+        if start_epoch < args.warmup_epochs:
+            update_lr(args=args, optimizer=optimizer, epoch=start_epoch, per_epoch_update=False) #TODO iterations correction
+        else:
+            update_lr(args=args, optimizer=optimizer, epoch=start_epoch, per_epoch_update=True)
 
+
+    # if lr_scheduler is not None and start_epoch > 0:
+    #     print((optimizer.param_groups[1]['lr']))
+    #     lr_scheduler.step(start_epoch)
+    #     print(start_epoch)
+    num_epochs = args.epochs
     logging.info('Scheduled epochs: {}'.format(num_epochs))
 
     train_dir = args.data
     if not os.path.exists(train_dir):
         logging.error('Training folder does not exist at: {}'.format(train_dir))
         exit(1)
-    dataset_train = Dataset(train_dir)
+    # dataset_train = Dataset(train_dir)
 
     # collate_fn = None
     # if args.prefetcher and args.mixup > 0:
@@ -353,8 +377,8 @@ def main():
     loader_eval = Loader('val', train_dir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
 
 
-    train_loss_fn = nn.CrossEntropyLoss().cuda()
-    # train_loss_fn = nn.CrossEntropyLoss(reduction='none')
+    # train_loss_fn = nn.CrossEntropyLoss().cuda()
+    train_loss_fn = nn.CrossEntropyLoss(reduction='none')
 
     validate_loss_fn = train_loss_fn
 
@@ -382,22 +406,22 @@ def main():
         for epoch in range(start_epoch, num_epochs):
 
             train_metrics = train_epoch(
-                epoch, model, loader_train, optimizer, train_loss_fn, args,
-                lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
+                epoch, model, loader_train, optimizer, train_loss_fn, args
+                , saver=saver, output_dir=output_dir,
                 use_amp=use_amp, model_ema=model_ema, summary_writer=writer)
 
             eval_metrics, _ = validate(model, loader_eval, validate_loss_fn, args, epoch=epoch)
-
-            if model_ema is not None and not args.model_ema_force_cpu:
+            if model_ema is not None:
 
                 ema_eval_metrics, top1 = validate(
                     model_ema.ema, loader_eval, validate_loss_fn, args,epoch=epoch, log_suffix=' (EMA)', summary_writer=writer)
 
-                writer.add_scalar('accuracy top 1', top1.detach().cpu().numpy(), epoch)
+                writer.add_scalar('accuracy top 1', top1, epoch)
 
-            if lr_scheduler is not None:
-                # step LR for next epoch
-                lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
+            # if lr_scheduler is not None and epoch >= args.warmup_epochs:
+            #     # step LR for next epoch
+            #     lr_scheduler.step(epoch + 1)
+            update_lr(args=args, optimizer=optimizer, epoch=epoch, per_epoch_update=True)
 
             update_summary(
                 epoch, train_metrics, eval_metrics, ema_eval_metrics, os.path.join(output_dir, 'summary.csv'),
@@ -431,10 +455,13 @@ def var_loss(x, y_gt, y_pred, ce_criterion):
     # prediction_weight = torch.min(binary_pred + 0.5, torch.tensor(1.0).to(x.device))
 
     var_per_sample = (torch.var(x_per_sample, dim=1))
-    weights = torch.log(1 + torch.exp(var_per_sample * 6))
+    # weights = torch.clamp(torch.log(1 + torch.exp(var_per_sample * 6)), 0.3, 3.)
+    alpha = 0.3
+    weights = torch.clamp(((torch.exp(alpha * var_per_sample) - 1) / alpha) + alpha, 0.3, 2.)
+
 
     # weights = torch.clamp(1. + avg_shift(weights), 0, 2.5)
-    # weights = avg_shift(weights) + 1.
+    # weights = avg_shift(weights) + 1
 
     loss = weights * ce_criterion(y_pred, y_gt)
     # loss = ce_criterion(y_pred, y_gt)
@@ -461,13 +488,21 @@ def train_epoch(
         last_batch = batch_idx == last_idx
         data_time_m.update(time.time() - end)
         input, target = input.cuda(), target.cuda()
+        # if epoch < args.warmup_epochs:
+        #     print('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
+        #     lr = (len(loader) * epoch + batch_idx) * 0.0000016 + args.warmup_lr
+        #     for i, param_group in enumerate(optimizer.param_groups):
+        #         param_group['lr'] = lr
+        iter = len(loader) * epoch + batch_idx
+        warmup_iters = args.warmup_epochs * len(loader)
+        update_lr(args=args, optimizer=optimizer, epoch=epoch, per_epoch_update=False, it=iter, warmup_its=warmup_iters)
 
-        output = model(input)
+        # output = model(input)
         output, features = model(input)
 
 
-        loss = loss_fn(output, target)
-        # loss = var_loss(features, y_pred=output, y_gt=target, ce_criterion=loss_fn)
+        # loss = loss_fn(output, target)
+        loss = var_loss(features, y_pred=output, y_gt=target, ce_criterion=loss_fn)
 
         losses_m.update(loss.item(), input.size(0))
 
@@ -510,8 +545,8 @@ def train_epoch(
             _, pred = output.max(1)
             var_correct, var_inc = variance_per_pred(features, target, pred)
             summary_writer.add_scalars('var correct incorrect train', {
-                'score': var_correct,
-                'score_nf': var_inc,
+                'correct': var_correct,
+                'incorrect': var_inc,
             }, it)
             summary_writer.add_scalar("loss", loss.detach().cpu().numpy(), it)
 
@@ -527,8 +562,8 @@ def train_epoch(
             saver.save_recovery(
                 model, optimizer, args, epoch, model_ema=model_ema, use_amp=use_amp, batch_idx=batch_idx)
 
-        if lr_scheduler is not None:
-            lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
+        # if lr_scheduler is not None:
+        #     lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
 
         end = time.time()
         # end for
@@ -568,8 +603,8 @@ def validate(model, loader, loss_fn, args, epoch, log_suffix='', summary_writer=
                 output = output.unfold(0, reduce_factor, reduce_factor).mean(dim=2)
                 target = target[0:target.size(0):reduce_factor]
 
-            loss = loss_fn(output, target)
-            # loss = var_loss(features, y_pred=output, y_gt=target, ce_criterion=loss_fn)
+            # loss = loss_fn(output, target)
+            loss = var_loss(features, y_pred=output, y_gt=target, ce_criterion=loss_fn)
 
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
@@ -597,8 +632,8 @@ def validate(model, loader, loss_fn, args, epoch, log_suffix='', summary_writer=
                     _, pred = output.max(1)
                     var_correct, var_inc = variance_per_pred(features, target, pred)
                     summary_writer.add_scalars('var correct incorrect test', {
-                        'score': var_correct,
-                        'score_nf': var_inc,
+                        'correct': var_correct,
+                        'incorrect': var_inc,
                     }, len(loader) * epoch + batch_idx)
 
     metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])

@@ -108,4 +108,5 @@ Untitled.ipynb
 Testing notebook.ipynb
 
 # projects
-output/
+output*/
+runs/

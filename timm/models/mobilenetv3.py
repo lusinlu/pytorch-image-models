@@ -137,16 +137,16 @@ class MobileNetV3(nn.Module):
         x = self.act1(x)
         x = self.blocks(x)
         x = self.global_pool(x)
-        x = self.conv_head(x)
-        x = self.act2(x)
-        return x
+        x_feature = self.conv_head(x)
+        x = self.act2(x_feature)
+        return x, x_feature
 
     def forward(self, x):
-        x = self.forward_features(x)
+        x, x_feature = self.forward_features(x)
         x = x.flatten(1)
         if self.drop_rate > 0.:
             x = F.dropout(x, p=self.drop_rate, training=self.training)
-        return self.classifier(x)
+        return self.classifier(x), x_feature
 
 
 class MobileNetV3Features(nn.Module):
