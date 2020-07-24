@@ -441,27 +441,23 @@ def main():
         logging.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
 
 
+def avg_shift(tensor):
+    average = tensor.clone().mean()
+    normalised = tensor - average
+    return normalised
+
+
 def var_loss(x, y_gt, y_pred, ce_criterion):
     x_samples = x.clone().detach()
     x_per_sample = x_samples.reshape(x_samples.shape[0], -1)
 
-    # indices, pred = soft.max(1)
-    # indices[indices < 0.9] = False
-    # indices[indices > 0.9] = True
-    #
-    # binary_pred = pred.eq(y_gt)
-    # binary_pred *= torch.tensor(indices, dtype=torch.bool).to(binary_pred.get_device())
-    #
-    # prediction_weight = torch.min(binary_pred + 0.5, torch.tensor(1.0).to(x.device))
-
     var_per_sample = (torch.var(x_per_sample, dim=1))
+    var_per_sample_avg_shift = avg_shift(var_per_sample)
+    beta = 0.3
+    var_per_sample_norm = var_per_sample_avg_shift + beta
     # weights = torch.clamp(torch.log(1 + torch.exp(var_per_sample * 6)), 0.3, 3.)
     alpha = 0.3
-    weights = torch.clamp(((torch.exp(alpha * var_per_sample) - 1) / alpha) + alpha, 0.3, 2.)
-
-
-    # weights = torch.clamp(1. + avg_shift(weights), 0, 2.5)
-    # weights = avg_shift(weights) + 1
+    weights = torch.clamp(((torch.exp(alpha * var_per_sample_norm) - 1) / alpha) + alpha, 0.3, 2.)
 
     loss = weights * ce_criterion(y_pred, y_gt)
     # loss = ce_criterion(y_pred, y_gt)
@@ -488,11 +484,7 @@ def train_epoch(
         last_batch = batch_idx == last_idx
         data_time_m.update(time.time() - end)
         input, target = input.cuda(), target.cuda()
-        # if epoch < args.warmup_epochs:
-        #     print('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
-        #     lr = (len(loader) * epoch + batch_idx) * 0.0000016 + args.warmup_lr
-        #     for i, param_group in enumerate(optimizer.param_groups):
-        #         param_group['lr'] = lr
+
         iter = len(loader) * epoch + batch_idx
         warmup_iters = args.warmup_epochs * len(loader)
         update_lr(args=args, optimizer=optimizer, epoch=epoch, per_epoch_update=False, it=iter, warmup_its=warmup_iters)
