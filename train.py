@@ -23,6 +23,9 @@ import yaml
 from datetime import datetime
 from timm.models.skipnet import skip_v3
 from torch.utils.tensorboard import SummaryWriter
+from timm.data import lmdb_loader
+import torchvision.transforms as transforms
+import torchvision.datasets as datasets
 
 has_apex = False
 
@@ -328,58 +331,97 @@ def main():
     #     collate_fn = FastCollateMixup(args.mixup, args.smoothing, args.num_classes)
 
 
-
-    loader_train = create_loader(
-        dataset_train,
-        input_size=data_config['input_size'],
-        batch_size=args.batch_size,
-        is_training=True,
-        use_prefetcher=args.prefetcher,
-        # re_prob=args.reprob,
-        # re_mode=args.remode,
-        # re_count=args.recount,
-        # re_split=args.resplit,
-        # color_jitter=args.color_jitter,
-        # auto_augment=args.aa,
-        # num_aug_splits=0,
-        interpolation='bilinear',
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        distributed=False,
-        collate_fn=collate_fn,
-        pin_memory=args.pin_mem,
-        use_multi_epochs_loader=args.use_multi_epochs_loader
-    )
-
-    eval_dir = os.path.join(args.data, 'val')
-    if not os.path.isdir(eval_dir):
-        eval_dir = os.path.join(args.data, 'validation')
-        if not os.path.isdir(eval_dir):
-            logging.error('Validation folder does not exist at: {}'.format(eval_dir))
-            exit(1)
-    dataset_eval = Dataset(eval_dir)
-
-    loader_eval = create_loader(
-        dataset_eval,
-        input_size=data_config['input_size'],
-        batch_size=args.validation_batch_size_multiplier * args.batch_size,
-        is_training=False,
-        use_prefetcher=args.prefetcher,
-        interpolation=data_config['interpolation'],
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        distributed=False,
-        crop_pct=data_config['crop_pct'],
-        pin_memory=args.pin_mem,
-    )
+    #
+    # loader_train = create_loader(
+    #     dataset_train,
+    #     input_size=data_config['input_size'],
+    #     batch_size=args.batch_size,
+    #     is_training=True,
+    #     use_prefetcher=args.prefetcher,
+    #     # re_prob=args.reprob,
+    #     # re_mode=args.remode,
+    #     # re_count=args.recount,
+    #     # re_split=args.resplit,
+    #     # color_jitter=args.color_jitter,
+    #     # auto_augment=args.aa,
+    #     # num_aug_splits=0,
+    #     interpolation='bilinear',
+    #     mean=data_config['mean'],
+    #     std=data_config['std'],
+    #     num_workers=args.workers,
+    #     distributed=False,
+    #     collate_fn=collate_fn,
+    #     pin_memory=args.pin_mem,
+    #     use_multi_epochs_loader=args.use_multi_epochs_loader
+    # )
+    #
+    # eval_dir = os.path.join(args.data, 'val')
+    # if not os.path.isdir(eval_dir):
+    #     eval_dir = os.path.join(args.data, 'validation')
+    #     if not os.path.isdir(eval_dir):
+    #         logging.error('Validation folder does not exist at: {}'.format(eval_dir))
+    #         exit(1)
+    # dataset_eval = Dataset(eval_dir)
+    #
+    # loader_eval = create_loader(
+    #     dataset_eval,
+    #     input_size=data_config['input_size'],
+    #     batch_size=args.validation_batch_size_multiplier * args.batch_size,
+    #     is_training=False,
+    #     use_prefetcher=args.prefetcher,
+    #     interpolation=data_config['interpolation'],
+    #     mean=data_config['mean'],
+    #     std=data_config['std'],
+    #     num_workers=args.workers,
+    #     distributed=False,
+    #     crop_pct=data_config['crop_pct'],
+    #     pin_memory=args.pin_mem,
+    # )
 
     # loader_train = Loader('train', train_dir, batch_size=args.batch_size, num_workers=args.workers)
     # loader_eval = Loader('val', train_dir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
 
 
     # train_loss_fn = nn.CrossEntropyLoss().cuda()
+
+    # Data loading code
+
+
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    image_folder = lmdb_loader.ImageFolderLMDB
+    print( os.path.join(train_dir,'ILSVRC-train.lmdb'))
+
+    train_dataset = image_folder(
+    os.path.join(train_dir,'ILSVRC-train.lmdb'),
+        transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ]))
+    val_dataset = image_folder(
+        os.path.join(train_dir, 'ILSVRC-val.lmdb'),
+        transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            normalize,
+        ]))
+
+    # if args.distributed:
+    #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    # else:
+    #     train_sampler = None
+
+    loader_train = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=True, sampler=None)
+
+    loader_eval = torch.utils.data.DataLoader(
+        val_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True)
+
     train_loss_fn = nn.CrossEntropyLoss(reduction='none')
 
     validate_loss_fn = train_loss_fn

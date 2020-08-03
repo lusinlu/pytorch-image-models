@@ -7,6 +7,8 @@ canonical PyTorch, standard Python style, and good performance. Repurpose as you
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
+from cvtorchvision import cvtransforms
+import cv2
 import argparse
 import os
 import csv
@@ -18,21 +20,15 @@ import torch.nn as nn
 import torch.nn.parallel
 from collections import OrderedDict
 
-try:
-    from apex import amp
-    has_apex = True
-except ImportError:
-    has_apex = False
-
-from timm.models import create_model, apply_test_time_pool, load_checkpoint, is_model, list_models,\
-    set_scriptable, set_no_jit
-from timm.data import Dataset, DatasetTar, create_loader, resolve_data_config
+from timm.models import create_model, load_checkpoint, is_model, list_models
 from timm.utils import accuracy, AverageMeter, natural_key, setup_default_logging
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
 
 torch.backends.cudnn.benchmark = True
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Validation')
-parser.add_argument('data', metavar='DIR',
+parser.add_argument('--data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('--model', '-m', metavar='MODEL', default='dpn92',
                     help='model architecture (default: dpn92)')
@@ -40,16 +36,7 @@ parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 2)')
 parser.add_argument('-b', '--batch-size', default=256, type=int,
                     metavar='N', help='mini-batch size (default: 256)')
-parser.add_argument('--img-size', default=None, type=int,
-                    metavar='N', help='Input image dimension, uses model default if empty')
-parser.add_argument('--crop-pct', default=None, type=float,
-                    metavar='N', help='Input image center crop pct')
-parser.add_argument('--mean', type=float, nargs='+', default=None, metavar='MEAN',
-                    help='Override mean pixel value of dataset')
-parser.add_argument('--std', type=float,  nargs='+', default=None, metavar='STD',
-                    help='Override std deviation of of dataset')
-parser.add_argument('--interpolation', default='', type=str, metavar='NAME',
-                    help='Image resize interpolation type (overrides model)')
+
 parser.add_argument('--num-classes', type=int, default=1000,
                     help='Number classes in dataset')
 parser.add_argument('--class-map', default='', type=str, metavar='FILENAME',
@@ -62,16 +49,10 @@ parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                     help='use pre-trained model')
 parser.add_argument('--num-gpu', type=int, default=1,
                     help='Number of GPUS to use')
-parser.add_argument('--no-test-pool', dest='no_test_pool', action='store_true',
-                    help='disable test time pool')
-parser.add_argument('--no-prefetcher', action='store_true', default=False,
-                    help='disable fast prefetcher')
+
 parser.add_argument('--pin-mem', action='store_true', default=False,
                     help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
-parser.add_argument('--amp', action='store_true', default=False,
-                    help='Use AMP mixed precision')
-parser.add_argument('--tf-preprocessing', action='store_true', default=False,
-                    help='Use Tensorflow preprocessing pipeline (require CPU TF installed')
+
 parser.add_argument('--use-ema', dest='use_ema', action='store_true',
                     help='use ema version of weights if present')
 parser.add_argument('--torchscript', dest='torchscript', action='store_true',
@@ -80,10 +61,43 @@ parser.add_argument('--results-file', default='', type=str, metavar='FILENAME',
                     help='Output csv file for validation results (summary)')
 
 
+class MySpecialDataset(datasets.ImageFolder):
+    def __init__(self, root, is_valid_file=None):
+        super(MySpecialDataset, self).__init__(root=root, is_valid_file=is_valid_file)
+
+    def __getitem__(self, index):
+        image_path, target = self.samples[index]
+        # do your magic here
+        im = cv2.imread(image_path)
+        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+
+        # you need to convert img from np.array to torch.tensor
+        # this has to be done CAREFULLY!
+        # sample = torchvision.transforms.ToTensor()(im)
+        print(im)
+        return im, target
+
+
+def opencv_loader(path):
+    im = cv2.imread(path)
+    im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+    return im
+
+
+def normalise(tensor):
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+
+    dtype = tensor.dtype
+    mean = torch.as_tensor(mean, dtype=dtype, device=tensor.device)
+    std = torch.as_tensor(std, dtype=dtype, device=tensor.device)
+    tensor.sub_(mean[None, :, None, None]).div_(std[None, :, None, None])
+    return tensor
+
+
 def validate(args):
     # might as well try to validate something
     args.pretrained = args.pretrained or not args.checkpoint
-    args.prefetcher = not args.no_prefetcher
 
     # create model
     model = create_model(
@@ -99,43 +113,47 @@ def validate(args):
     param_count = sum([m.numel() for m in model.parameters()])
     logging.info('Model %s created, param count: %d' % (args.model, param_count))
 
-    data_config = resolve_data_config(vars(args), model=model)
-    model, test_time_pool = apply_test_time_pool(model, data_config, args)
-
     if args.torchscript:
         torch.jit.optimized_execution(True)
         model = torch.jit.script(model)
 
-    if args.amp:
-        model = amp.initialize(model.cuda(), opt_level='O1')
-    else:
-        model = model.cuda()
+    model = model.cuda()
 
     if args.num_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=list(range(args.num_gpu)))
 
     criterion = nn.CrossEntropyLoss().cuda()
 
-    #from torchvision.datasets import ImageNet
-    #dataset = ImageNet(args.data, split='val')
-    if os.path.splitext(args.data)[1] == '.tar' and os.path.isfile(args.data):
-        dataset = DatasetTar(args.data, load_bytes=args.tf_preprocessing, class_map=args.class_map)
-    else:
-        dataset = Dataset(args.data, load_bytes=args.tf_preprocessing, class_map=args.class_map)
+    # from torchvision.datasets import ImageNet
+    # dataset = ImageNet(args.data, split='val')
 
-    crop_pct = 1.0 if test_time_pool else data_config['crop_pct']
-    loader = create_loader(
-        dataset,
-        input_size=data_config['input_size'],
-        batch_size=args.batch_size,
-        use_prefetcher=args.prefetcher,
-        interpolation=data_config['interpolation'],
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        crop_pct=crop_pct,
-        pin_memory=args.pin_mem,
-        tf_preprocessing=args.tf_preprocessing)
+    valdir = args.data
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+
+    transform = cvtransforms.Compose([
+        cvtransforms.Resize(size=(256), interpolation='BILINEAR'),
+        cvtransforms.CenterCrop(224),
+        cvtransforms.ToTensor(),
+        cvtransforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    loader = torch.utils.data.DataLoader(
+        datasets.ImageFolder(valdir, transform, loader=opencv_loader),
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=False)
+
+    # loader = torch.utils.data.DataLoader(
+    #     datasets.ImageFolder(valdir, transforms.Compose([
+    #         transforms.Resize((256), interpolation=2),
+    #         transforms.CenterCrop(224),
+    #         transforms.ToTensor(),
+    #         normalize,
+    #     ])),
+    #     batch_size=args.batch_size, shuffle=False,
+    #     num_workers=args.workers, pin_memory=False)
+
+    # loader_eval = loader.Loader('val', valdir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
 
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -145,23 +163,21 @@ def validate(args):
     model.eval()
     with torch.no_grad():
         # warmup, reduce variability of first batch time, especially for comparing torchscript vs non
-        input = torch.randn((args.batch_size,) + data_config['input_size']).cuda()
-        model(input)
+        # input = torch.randn((args.batch_size,)).cuda()
+        # model(input)
         end = time.time()
         for i, (input, target) in enumerate(loader):
-            if args.no_prefetcher:
-                target = target.cuda()
-                input = input.cuda()
-                if args.fp16:
-                    input = input.half()
+            # if args.no_prefetcher:
+            target = target.cuda()
+            input = input.cuda()
 
             # compute output
-            output = model(input)
-            loss = criterion(output, target)
+            output, _ = model(input)
+            # loss = criterion(output, target)
 
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output.data, target, topk=(1, 5))
-            losses.update(loss.item(), input.size(0))
+            # losses.update(loss.item(), input.size(0))
             top1.update(acc1.item(), input.size(0))
             top5.update(acc5.item(), input.size(0))
 
@@ -183,13 +199,10 @@ def validate(args):
     results = OrderedDict(
         top1=round(top1.avg, 4), top1_err=round(100 - top1.avg, 4),
         top5=round(top5.avg, 4), top5_err=round(100 - top5.avg, 4),
-        param_count=round(param_count / 1e6, 2),
-        img_size=data_config['input_size'][-1],
-        cropt_pct=crop_pct,
-        interpolation=data_config['interpolation'])
+        param_count=round(param_count / 1e6, 2))
 
     logging.info(' * Acc@1 {:.3f} ({:.3f}) Acc@5 {:.3f} ({:.3f})'.format(
-       results['top1'], results['top1_err'], results['top5'], results['top5_err']))
+        results['top1'], results['top1_err'], results['top5'], results['top5_err']))
 
     return results
 
@@ -215,43 +228,7 @@ def main():
             # model name doesn't exist, try as wildcard filter
             model_names = list_models(args.model)
             model_cfgs = [(n, '') for n in model_names]
-
-    if len(model_cfgs):
-        results_file = args.results_file or './results-all.csv'
-        logging.info('Running bulk validation on these pretrained models: {}'.format(', '.join(model_names)))
-        results = []
-        try:
-            start_batch_size = args.batch_size
-            for m, c in model_cfgs:
-                batch_size = start_batch_size
-                args.model = m
-                args.checkpoint = c
-                result = OrderedDict(model=args.model)
-                r = {}
-                while not r and batch_size >= args.num_gpu:
-                    try:
-                        args.batch_size = batch_size
-                        print('Validating with batch size: %d' % args.batch_size)
-                        r = validate(args)
-                    except RuntimeError as e:
-                        if batch_size <= args.num_gpu:
-                            print("Validation failed with no ability to reduce batch size. Exiting.")
-                            raise e
-                        batch_size = max(batch_size // 2, args.num_gpu)
-                        print("Validation failed, reducing batch size by 50%")
-                        torch.cuda.empty_cache()
-                result.update(r)
-                if args.checkpoint:
-                    result['checkpoint'] = args.checkpoint
-                results.append(result)
-        except KeyboardInterrupt as e:
-            pass
-        results = sorted(results, key=lambda x: x['top1'], reverse=True)
-        if len(results):
-            write_results(results_file, results)
-    else:
-        validate(args)
-
+    validate(args)
 
 def write_results(results_file, results):
     with open(results_file, mode='w') as cf:

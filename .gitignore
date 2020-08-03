@@ -110,3 +110,5 @@ Testing notebook.ipynb
 # projects
 output*/
 runs/
+/train_lmdb
+/train_lmdb-lock
