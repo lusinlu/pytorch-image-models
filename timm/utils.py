@@ -96,7 +96,7 @@ class CheckpointSaver:
 
         return (None, None) if self.best_metric is None else (self.best_metric, self.best_epoch)
 
-    def _save(self, save_path, model, optimizer, args, epoch, model_ema=None, metric=None,metric_ema=None, use_amp=False):
+    def _save(self, save_path, model, optimizer, args, epoch, model_ema=None, metric=None,metric_ema=None, use_amp=False, learning_rate=0):
         save_state = {
             'epoch': epoch,
             'arch': args.model,
@@ -104,6 +104,7 @@ class CheckpointSaver:
             'optimizer': optimizer.state_dict(),
             'args': args,
             'version': 2,  # version < 2 increments epoch before save
+            'lr': learning_rate,
         }
         if use_amp and 'state_dict' in amp.__dict__:
             save_state['amp'] = amp.state_dict()
@@ -129,11 +130,11 @@ class CheckpointSaver:
                 logging.error("Exception '{}' while deleting checkpoint".format(e))
         self.checkpoint_files = self.checkpoint_files[:delete_index]
 
-    def save_recovery(self, model, optimizer, args, epoch, model_ema=None, use_amp=False, batch_idx=0):
+    def save_recovery(self, model, optimizer, args, epoch, model_ema=None, use_amp=False, batch_idx=0, learning_rate=0):
         assert epoch >= 0
         filename = '-'.join([self.recovery_prefix, str(epoch), str(batch_idx)]) + self.extension
         save_path = os.path.join(self.recovery_dir, filename)
-        self._save(save_path, model, optimizer, args, epoch, model_ema, use_amp=use_amp)
+        self._save(save_path, model, optimizer, args, epoch, model_ema, use_amp=use_amp, learning_rate=learning_rate)
         if os.path.exists(self.last_recovery_file):
             try:
                 logging.debug("Cleaning recovery: {}".format(self.last_recovery_file))

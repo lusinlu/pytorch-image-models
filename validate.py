@@ -138,20 +138,20 @@ def validate(args):
         cvtransforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
-    loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(valdir, transform, loader=opencv_loader),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=False)
-
     # loader = torch.utils.data.DataLoader(
-    #     datasets.ImageFolder(valdir, transforms.Compose([
-    #         transforms.Resize((256), interpolation=2),
-    #         transforms.CenterCrop(224),
-    #         transforms.ToTensor(),
-    #         normalize,
-    #     ])),
+    #     datasets.ImageFolder(valdir, transform, loader=opencv_loader),
     #     batch_size=args.batch_size, shuffle=False,
     #     num_workers=args.workers, pin_memory=False)
+
+    loader = torch.utils.data.DataLoader(
+        datasets.ImageFolder(valdir, transforms.Compose([
+            transforms.Resize((256), interpolation=2),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            normalize,
+        ])),
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=False)
 
     # loader_eval = loader.Loader('val', valdir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
 

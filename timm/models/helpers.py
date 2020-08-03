@@ -51,6 +51,8 @@ def resume_checkpoint(model, checkpoint_path):
                 other_state['optimizer'] = checkpoint['optimizer']
             if 'amp' in checkpoint:
                 other_state['amp'] = checkpoint['amp']
+            if 'lr' in checkpoint:
+                other_state['lr'] = checkpoint['lr']
             if 'epoch' in checkpoint:
                 resume_epoch = checkpoint['epoch']
                 if 'version' in checkpoint and checkpoint['version'] > 1:

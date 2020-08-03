@@ -14,9 +14,7 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
-import tensorpack.dataflow as df
 from timm.data import Dataset, resolve_data_config, FastCollateMixup, mixup_batch
-from timm.data.loader import create_loader
 import argparse
 import time
 import yaml
@@ -236,11 +234,12 @@ def update_lr(args, optimizer, epoch, per_epoch_update=True, it=None, warmup_its
         lr = args.lr * (args.decay_rate ** (epoch // args.decay_epochs))
         for i, param_group in enumerate(optimizer.param_groups):
             param_group['lr'] = lr
+    return lr
 
 def main():
     setup_default_logging()
     args, args_text = _parse_args()
-
+    use_amp = True
 
     model = create_model(
         args.model,
@@ -258,27 +257,23 @@ def main():
 
     # model = skip_v3(num_classes=args.num_classes)
 
-    data_config = resolve_data_config(vars(args), model=model, verbose=True)
-
-
 
     optimizer = create_optimizer(args, model)
 
-    use_amp = False
+    if has_apex and args.amp:
+        model, optimizer = amp.initialize(model, optimizer, opt_level='O1')
+        use_amp = True
 
     resume_state = {}
     resume_epoch = None
     if args.resume:
         resume_state, resume_epoch = resume_checkpoint(model, args.resume)
-    # if resume_state and not args.no_resume_opt:
-    #     if 'optimizer' in resume_state:
-    #         if args.local_rank == 0:
-    #             logging.info('Restoring Optimizer state from checkpoint')
-    #         optimizer.load_state_dict(resume_state['optimizer'])
-    #     if use_amp and 'amp' in resume_state and 'load_state_dict' in amp.__dict__:
-    #         if args.local_rank == 0:
-    #             logging.info('Restoring NVIDIA AMP state from checkpoint')
-    #         amp.load_state_dict(resume_state['amp'])
+        for i, param_group in enumerate(optimizer.param_groups):
+            param_group['lr'] = resume_state['lr']
+        start_epoch = resume_epoch
+        if 'amp' in resume_state and 'load_state_dict' in amp.__dict__:
+            logging.info('Restoring NVIDIA AMP state from checkpoint')
+            amp.load_state_dict(resume_state['amp'])
     del resume_state
 
     model = nn.DataParallel(model).cuda()
@@ -293,11 +288,6 @@ def main():
             device='',
             resume=args.resume)
 
-    # lr_scheduler, num_epochs = create_scheduler(args, optimizer)
-    # print((optimizer.param_groups[1]['lr']))
-    # lambda_epoch = lambda epoch:( (args.decay_rate ** ((epoch - args.warmup_epochs) // args.decay_epochs)) if (epoch > args.warmup_epochs) else 1)
-
-    # lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_epoch)
 
     start_epoch = 0
     if args.start_epoch is not None:
@@ -305,16 +295,12 @@ def main():
         start_epoch = args.start_epoch
     elif resume_epoch is not None:
         start_epoch = resume_epoch
-        if start_epoch < args.warmup_epochs:
-            update_lr(args=args, optimizer=optimizer, epoch=start_epoch, per_epoch_update=False) #TODO iterations correction
-        else:
-            update_lr(args=args, optimizer=optimizer, epoch=start_epoch, per_epoch_update=True)
+        # if start_epoch < args.warmup_epochs:
+        #     update_lr(args=args, optimizer=optimizer, epoch=start_epoch, per_epoch_update=False) #TODO iterations correction
+        # else:
+        #     update_lr(args=args, optimizer=optimizer, epoch=start_epoch, per_epoch_update=True)
 
 
-    # if lr_scheduler is not None and start_epoch > 0:
-    #     print((optimizer.param_groups[1]['lr']))
-    #     lr_scheduler.step(start_epoch)
-    #     print(start_epoch)
     num_epochs = args.epochs
     logging.info('Scheduled epochs: {}'.format(num_epochs))
 
@@ -322,67 +308,6 @@ def main():
     if not os.path.exists(train_dir):
         logging.error('Training folder does not exist at: {}'.format(train_dir))
         exit(1)
-    dataset_train = Dataset(train_dir)
-
-    collate_fn = None
-    args.prefetcher = True
-    # if args.prefetcher and args.mixup > 0:
-    #     assert not num_aug_splits  # collate conflict (need to support deinterleaving in collate mixup)
-    #     collate_fn = FastCollateMixup(args.mixup, args.smoothing, args.num_classes)
-
-
-    #
-    # loader_train = create_loader(
-    #     dataset_train,
-    #     input_size=data_config['input_size'],
-    #     batch_size=args.batch_size,
-    #     is_training=True,
-    #     use_prefetcher=args.prefetcher,
-    #     # re_prob=args.reprob,
-    #     # re_mode=args.remode,
-    #     # re_count=args.recount,
-    #     # re_split=args.resplit,
-    #     # color_jitter=args.color_jitter,
-    #     # auto_augment=args.aa,
-    #     # num_aug_splits=0,
-    #     interpolation='bilinear',
-    #     mean=data_config['mean'],
-    #     std=data_config['std'],
-    #     num_workers=args.workers,
-    #     distributed=False,
-    #     collate_fn=collate_fn,
-    #     pin_memory=args.pin_mem,
-    #     use_multi_epochs_loader=args.use_multi_epochs_loader
-    # )
-    #
-    # eval_dir = os.path.join(args.data, 'val')
-    # if not os.path.isdir(eval_dir):
-    #     eval_dir = os.path.join(args.data, 'validation')
-    #     if not os.path.isdir(eval_dir):
-    #         logging.error('Validation folder does not exist at: {}'.format(eval_dir))
-    #         exit(1)
-    # dataset_eval = Dataset(eval_dir)
-    #
-    # loader_eval = create_loader(
-    #     dataset_eval,
-    #     input_size=data_config['input_size'],
-    #     batch_size=args.validation_batch_size_multiplier * args.batch_size,
-    #     is_training=False,
-    #     use_prefetcher=args.prefetcher,
-    #     interpolation=data_config['interpolation'],
-    #     mean=data_config['mean'],
-    #     std=data_config['std'],
-    #     num_workers=args.workers,
-    #     distributed=False,
-    #     crop_pct=data_config['crop_pct'],
-    #     pin_memory=args.pin_mem,
-    # )
-
-    # loader_train = Loader('train', train_dir, batch_size=args.batch_size, num_workers=args.workers)
-    # loader_eval = Loader('val', train_dir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
-
-
-    # train_loss_fn = nn.CrossEntropyLoss().cuda()
 
     # Data loading code
 
@@ -409,10 +334,6 @@ def main():
             normalize,
         ]))
 
-    # if args.distributed:
-    #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    # else:
-    #     train_sampler = None
 
     loader_train = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -435,7 +356,7 @@ def main():
     exp_name = '-'.join([
         datetime.now().strftime("%Y%m%d-%H%M%S"),
         args.model,
-        str(data_config['input_size'][-1])
+        str(224)
     ])
     output_dir = get_outdir(output_base, 'train', exp_name)
     decreasing = True if eval_metric == 'loss' else False
@@ -540,13 +461,11 @@ def train_epoch(
 
         iter = len(loader) * epoch + batch_idx
         warmup_iters = args.warmup_epochs * len(loader)
-        update_lr(args=args, optimizer=optimizer, epoch=epoch, per_epoch_update=False, it=iter, warmup_its=warmup_iters)
+        lr = update_lr(args=args, optimizer=optimizer, epoch=epoch, per_epoch_update=False, it=iter, warmup_its=warmup_iters)
 
-        # output = model(input)
         output, features = model(input)
 
 
-        # loss = loss_fn(output, target)
         loss = var_loss(features, y_pred=output, y_gt=target, ce_criterion=loss_fn)
 
         losses_m.update(loss.item(), input.size(0))
@@ -605,7 +524,7 @@ def train_epoch(
         if saver is not None and args.recovery_interval and (
                 last_batch or (batch_idx + 1) % args.recovery_interval == 0):
             saver.save_recovery(
-                model, optimizer, args, epoch, model_ema=model_ema, use_amp=use_amp, batch_idx=batch_idx)
+                model, optimizer, args, epoch, model_ema=model_ema, use_amp=use_amp, batch_idx=batch_idx, learning_rate=lr)
 
         # if lr_scheduler is not None:
         #     lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
