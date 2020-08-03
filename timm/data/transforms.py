@@ -101,18 +101,18 @@ class RandomResizedCropAndInterpolation:
         """
         area = img.size[0] * img.size[1]
 
-        for attempt in range(10):
-            target_area = random.uniform(*scale) * area
-            log_ratio = (math.log(ratio[0]), math.log(ratio[1]))
-            aspect_ratio = math.exp(random.uniform(*log_ratio))
-
-            w = int(round(math.sqrt(target_area * aspect_ratio)))
-            h = int(round(math.sqrt(target_area / aspect_ratio)))
-
-            if w <= img.size[0] and h <= img.size[1]:
-                i = random.randint(0, img.size[1] - h)
-                j = random.randint(0, img.size[0] - w)
-                return i, j, h, w
+        # for attempt in range(10):
+        #     target_area = random.uniform(*scale) * area
+        #     log_ratio = (math.log(ratio[0]), math.log(ratio[1]))
+        #     aspect_ratio = math.exp(random.uniform(*log_ratio))
+        #
+        #     w = int(round(math.sqrt(target_area * aspect_ratio)))
+        #     h = int(round(math.sqrt(target_area / aspect_ratio)))
+        #
+        #     if w <= img.size[0] and h <= img.size[1]:
+        #         i = random.randint(0, img.size[1] - h)
+        #         j = random.randint(0, img.size[0] - w)
+        #         return i, j, h, w
 
         # Fallback to central crop
         in_ratio = img.size[0] / img.size[1]

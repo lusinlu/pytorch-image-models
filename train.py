@@ -15,6 +15,8 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
 import tensorpack.dataflow as df
+from timm.data import Dataset, resolve_data_config, FastCollateMixup, mixup_batch
+from timm.data.loader import create_loader
 import argparse
 import time
 import yaml
@@ -24,8 +26,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 has_apex = False
 
-from timm.data.loader import Loader
-from timm.data import Dataset, resolve_data_config
+# from timm.data.loader import Loader
+
 
 from timm.models import create_model, resume_checkpoint, convert_splitbn_model
 from timm.utils import *
@@ -317,64 +319,64 @@ def main():
     if not os.path.exists(train_dir):
         logging.error('Training folder does not exist at: {}'.format(train_dir))
         exit(1)
-    # dataset_train = Dataset(train_dir)
+    dataset_train = Dataset(train_dir)
 
-    # collate_fn = None
+    collate_fn = None
+    args.prefetcher = True
     # if args.prefetcher and args.mixup > 0:
     #     assert not num_aug_splits  # collate conflict (need to support deinterleaving in collate mixup)
     #     collate_fn = FastCollateMixup(args.mixup, args.smoothing, args.num_classes)
-    #
-    # if num_aug_splits > 1:
-    #     dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
 
-    # loader_train = create_loader(
-    #     dataset_train,
-    #     input_size=data_config['input_size'],
-    #     batch_size=args.batch_size,
-    #     is_training=True,
-    #     use_prefetcher=args.prefetcher,
-    #     re_prob=args.reprob,
-    #     re_mode=args.remode,
-    #     re_count=args.recount,
-    #     re_split=args.resplit,
-    #     color_jitter=args.color_jitter,
-    #     auto_augment=args.aa,
-    #     num_aug_splits=num_aug_splits,
-    #     interpolation=args.train_interpolation,
-    #     mean=data_config['mean'],
-    #     std=data_config['std'],
-    #     num_workers=args.workers,
-    #     distributed=args.distributed,
-    #     collate_fn=collate_fn,
-    #     pin_memory=args.pin_mem,
-    #     use_multi_epochs_loader=args.use_multi_epochs_loader
-    # )
-    #
-    # eval_dir = os.path.join(args.data, 'val')
-    # if not os.path.isdir(eval_dir):
-    #     eval_dir = os.path.join(args.data, 'validation')
-    #     if not os.path.isdir(eval_dir):
-    #         logging.error('Validation folder does not exist at: {}'.format(eval_dir))
-    #         exit(1)
-    # dataset_eval = Dataset(eval_dir)
-    #
-    # loader_eval = create_loader(
-    #     dataset_eval,
-    #     input_size=data_config['input_size'],
-    #     batch_size=args.validation_batch_size_multiplier * args.batch_size,
-    #     is_training=False,
-    #     use_prefetcher=args.prefetcher,
-    #     interpolation=data_config['interpolation'],
-    #     mean=data_config['mean'],
-    #     std=data_config['std'],
-    #     num_workers=args.workers,
-    #     distributed=args.distributed,
-    #     crop_pct=data_config['crop_pct'],
-    #     pin_memory=args.pin_mem,
-    # )
 
-    loader_train = Loader('train', train_dir, batch_size=args.batch_size, num_workers=args.workers)
-    loader_eval = Loader('val', train_dir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
+
+    loader_train = create_loader(
+        dataset_train,
+        input_size=data_config['input_size'],
+        batch_size=args.batch_size,
+        is_training=True,
+        use_prefetcher=args.prefetcher,
+        # re_prob=args.reprob,
+        # re_mode=args.remode,
+        # re_count=args.recount,
+        # re_split=args.resplit,
+        # color_jitter=args.color_jitter,
+        # auto_augment=args.aa,
+        # num_aug_splits=0,
+        interpolation='bilinear',
+        mean=data_config['mean'],
+        std=data_config['std'],
+        num_workers=args.workers,
+        distributed=False,
+        collate_fn=collate_fn,
+        pin_memory=args.pin_mem,
+        use_multi_epochs_loader=args.use_multi_epochs_loader
+    )
+
+    eval_dir = os.path.join(args.data, 'val')
+    if not os.path.isdir(eval_dir):
+        eval_dir = os.path.join(args.data, 'validation')
+        if not os.path.isdir(eval_dir):
+            logging.error('Validation folder does not exist at: {}'.format(eval_dir))
+            exit(1)
+    dataset_eval = Dataset(eval_dir)
+
+    loader_eval = create_loader(
+        dataset_eval,
+        input_size=data_config['input_size'],
+        batch_size=args.validation_batch_size_multiplier * args.batch_size,
+        is_training=False,
+        use_prefetcher=args.prefetcher,
+        interpolation=data_config['interpolation'],
+        mean=data_config['mean'],
+        std=data_config['std'],
+        num_workers=args.workers,
+        distributed=False,
+        crop_pct=data_config['crop_pct'],
+        pin_memory=args.pin_mem,
+    )
+
+    # loader_train = Loader('train', train_dir, batch_size=args.batch_size, num_workers=args.workers)
+    # loader_eval = Loader('val', train_dir, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
 
 
     # train_loss_fn = nn.CrossEntropyLoss().cuda()
@@ -404,6 +406,7 @@ def main():
 
     try:
         for epoch in range(start_epoch, num_epochs):
+            eval_metrics, _ = validate(model, loader_eval, validate_loss_fn, args, epoch=epoch)
 
             train_metrics = train_epoch(
                 epoch, model, loader_train, optimizer, train_loss_fn, args
@@ -445,20 +448,28 @@ def avg_shift(tensor):
     average = tensor.clone().mean()
     normalised = tensor - average
     return normalised
+def normalise(tensor):
+    min = tensor.clone().min()
+    max = tensor.clone().max()
 
+    normalised = ((tensor - min) / (max - min))
+    return normalised
 
 def var_loss(x, y_gt, y_pred, ce_criterion):
     x_samples = x.clone().detach()
     x_per_sample = x_samples.reshape(x_samples.shape[0], -1)
 
     var_per_sample = (torch.var(x_per_sample, dim=1))
-    var_per_sample_avg_shift = avg_shift(var_per_sample)
-    beta = 0.3
-    var_per_sample_norm = var_per_sample_avg_shift + beta
+    var_per_sample_normalised = normalise(var_per_sample)
+    # var_per_sample_avg_shift = avg_shift(var_per_sample)
+    # beta = 0.3
+    # var_per_sample_norm = var_per_sample_avg_shift + beta
     # weights = torch.clamp(torch.log(1 + torch.exp(var_per_sample * 6)), 0.3, 3.)
-    alpha = 0.3
-    weights = torch.clamp(((torch.exp(alpha * var_per_sample_norm) - 1) / alpha) + alpha, 0.3, 2.)
+    # alpha = 0.3
+    # weights = torch.clamp(((torch.exp(alpha * var_per_sample_norm) - 1) / alpha) + alpha, 0.3, 2.)
 
+    alpha = 0.8
+    weights = torch.clamp(((torch.exp(0.2 * var_per_sample_normalised) - 1) / alpha) + alpha, 0.3, 2.)
     loss = weights * ce_criterion(y_pred, y_gt)
     # loss = ce_criterion(y_pred, y_gt)
 

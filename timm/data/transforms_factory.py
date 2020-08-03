@@ -112,7 +112,7 @@ def transforms_imagenet_eval(
         scale_size = int(math.floor(img_size / crop_pct))
 
     tfl = [
-        transforms.Resize(scale_size, _pil_interp(interpolation)),
+        transforms.Resize(256, _pil_interp(interpolation)),
         transforms.CenterCrop(img_size),
     ]
     if use_prefetcher:
@@ -133,7 +133,7 @@ def create_transform(
         input_size,
         is_training=False,
         use_prefetcher=False,
-        color_jitter=0.4,
+        color_jitter=0,
         auto_augment=None,
         interpolation='bilinear',
         mean=IMAGENET_DEFAULT_MEAN,
